@@ -1,0 +1,62 @@
+﻿<UserControl x:Class="FaceMosaicSharp.Views.ReviewFramesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:vm="clr-namespace:FaceMosaicSharp.ViewModels"
+             mc:Ignorable="d"
+             d:DesignHeight="600" d:DesignWidth="800">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ui:VirtualizingItemsControl Grid.Row="0"
+                                   ItemsSource="{Binding ReviewFrames}"
+                                   Margin="10,10,10,0">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="{x:Type vm:ReviewFrameItem}">
+                    <Border BorderBrush="Gray" BorderThickness="1" CornerRadius="8" Margin="10"
+                            Background="{DynamicResource ControlFillColorDefaultBrush}" Width="280">
+                        <Grid>
+                            <StackPanel Margin="10">
+                                <Image Source="{Binding PreviewImage}" Height="260" Width="260" Stretch="Uniform" Cursor="Hand">
+                                    <Image.InputBindings>
+                                        <MouseBinding Gesture="LeftClick" Command="{Binding DataContext.OpenFrameEditorCommand, 
+                                                                        RelativeSource={RelativeSource AncestorType=ItemsControl}}" CommandParameter="{Binding}"/>
+                                    </Image.InputBindings>
+                                </Image>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+                                    <TextBlock Text="{Binding CustomFaceRegions.Count, StringFormat='自定义区域: {0}'}" FontSize="12" Foreground="Gray" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <TextBlock HorizontalAlignment="Center" FontSize="12" Foreground="Gray">
+                                    <TextBlock.Text>
+                                        <MultiBinding StringFormat="阈值/置信度: {0:P0}/{1:P0}">
+                                            <Binding Path="ConfidenceThreshold"/>
+                                            <Binding Path="MaxConfidence"/>
+                                        </MultiBinding>
+                                    </TextBlock.Text>
+                                </TextBlock>
+                            </StackPanel>
+                            <Border Background="#80555555" HorizontalAlignment="Left" VerticalAlignment="Top" Padding="8,5" Margin="0">
+                                <TextBlock Text="{Binding FrameIndex}" Foreground="White" FontWeight="Bold"/>
+                            </Border>
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ui:VirtualizingItemsControl>
+
+        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="10">
+            <Button Content="刷新" Command="{Binding RefreshCommand}" Width="100"/>
+            
+            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="继续处理" Click="ContinueButton_Click" Width="100" Margin="0,0,10,0"/>
+                <Button Content="关闭" Click="CloseButton_Click" Width="100"/>
+            </StackPanel>
+        </Grid>
+       
+    </Grid>
+</UserControl>
