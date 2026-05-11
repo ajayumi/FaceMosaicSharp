@@ -429,6 +429,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
             if (!result.Success) return;
 
+            if (_processingCts?.IsCancellationRequested == true) return;
+
             // 仅在存在未检测到人脸的帧时，询问用户是否手工介入
             if (result.NeedsManualReview)
             {
@@ -444,6 +446,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 }
             }
 
+            if (_processingCts?.IsCancellationRequested == true) return;
+
             // Step3: 应用马赛克 + 合成
             IsProcessing = true;
             StatusMessage = "正在应用马赛克...";
@@ -455,6 +459,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
             StatusMessage = step3Success
                 ? $"处理完成！已保存至: {OutputPath}"
                 : "处理已取消或失败。";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "处理已取消。";
         }
         catch (Exception ex)
         {

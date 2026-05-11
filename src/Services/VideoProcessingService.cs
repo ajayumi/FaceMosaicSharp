@@ -203,13 +203,15 @@ public class VideoProcessingService : IVideoProcessingService
         int end = options.EndFrame <= 0 ? totalFrames : Math.Clamp(options.EndFrame + 1, start, totalFrames);
         int framesToProcess = options.ProcessAllFrames ? totalFrames : end - start;
 
-        await FFmpegService.ExtractAudioAsync(inputPath, audioFile, progress);
-        await Task.Run(() => ExtractFramesToStepFolder(capture, stepFolder1, framesToProcess, start, options, progress, cancellationToken, onFrameProcessed));
-        await Task.Run(() => DetectFacesToStepFolder(stepFolder1, stepFolder2, options, progress, cancellationToken, onFrameProcessed));
+        await FFmpegService.ExtractAudioAsync(inputPath, audioFile, progress, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.Run(() => ExtractFramesToStepFolder(capture, stepFolder1, framesToProcess, start, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.Run(() => DetectFacesToStepFolder(stepFolder1, stepFolder2, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
 
         capture.Dispose();
         bool needsManualReview = _historyService.ReviewFramesFileExists(stepFolder2);
-        return new ProcessingResult { Success = true, NeedsManualReview = needsManualReview, HistoryDir = historyDir, WasInterrupted = true };
+        return new ProcessingResult { Success = true, NeedsManualReview = needsManualReview, HistoryDir = historyDir, WasInterrupted = false };
     }
 
     /// <summary>Step 1: 从视频中提取帧序列保存为 JPG（生产者-消费者并行写盘）</summary>
@@ -281,7 +283,9 @@ public class VideoProcessingService : IVideoProcessingService
             channel.Writer.Complete();
         }
 
-        try { Task.WaitAll(consumers); } catch { }
+        try { Task.WaitAll(consumers); }
+        catch (AggregateException ae) when (ae.InnerExceptions.All(e => e is OperationCanceledException)) { }
+        catch (OperationCanceledException) { }
     }
 
     /// <summary>Step 2: 检测每帧的人脸，保存人脸矩形、关键点凸包、面部解析掩码</summary>
@@ -331,7 +335,7 @@ public class VideoProcessingService : IVideoProcessingService
 
         for (int i = 0; i < total; i++)
         {
-            if (cancellationToken.IsCancellationRequested) break;
+            cancellationToken.ThrowIfCancellationRequested();
 
             string inputPath = files[i];
             string outputPath = System.IO.Path.Combine(outputFolder, System.IO.Path.GetFileName(inputPath));
@@ -595,7 +599,7 @@ public class VideoProcessingService : IVideoProcessingService
 
         for (int i = 0; i < total; i++)
         {
-            if (cancellationToken.IsCancellationRequested) break;
+            cancellationToken.ThrowIfCancellationRequested();
 
             string inputPath = files[i];
             string outputPath = System.IO.Path.Combine(stepFolder3, System.IO.Path.GetFileName(inputPath));
@@ -1045,12 +1049,14 @@ public class VideoProcessingService : IVideoProcessingService
         int end = options.EndFrame <= 0 ? totalFrames : Math.Clamp(options.EndFrame + 1, start, totalFrames);
         int framesToProcess = options.ProcessAllFrames ? totalFrames : end - start;
 
-        await Task.Run(() => ApplyMosaicToStepFolder(stepFolder1, stepFolder2, stepFolder3, options, progress, cancellationToken, onFrameProcessed));
-        await FFmpegService.CombineImagesWithAudioAsync(stepFolder3, audioFile, options.OutputPath, capture.Get(CapProp.Fps), options.VideoCodec, progress);
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.Run(() => ApplyMosaicToStepFolder(stepFolder1, stepFolder2, stepFolder3, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await FFmpegService.CombineImagesWithAudioAsync(stepFolder3, audioFile, options.OutputPath, capture.Get(CapProp.Fps), options.VideoCodec, progress, cancellationToken);
 
         _historyService.CleanupProcessingFolders(stepFolder2, stepFolder3);
         capture.Dispose();
-        return true;
+        return !cancellationToken.IsCancellationRequested;
     }
 
     public void Dispose() { }

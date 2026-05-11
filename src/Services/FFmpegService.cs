@@ -1,4 +1,5 @@
 ﻿using System.IO;
+using System.Threading;
 
 namespace FaceMosaicSharp.Services;
 
@@ -52,7 +53,7 @@ public class FFmpegService
     /// <param name="inputPath">输入视频路径</param>
     /// <param name="audioFile">输出音频文件路径</param>
     /// <param name="progress">进度报告回调</param>
-    public static async Task ExtractAudioAsync(string inputPath, string audioFile, IProgress<(int current, int total, string status)>? progress = null)
+    public static async Task ExtractAudioAsync(string inputPath, string audioFile, IProgress<(int current, int total, string status)>? progress = null, CancellationToken cancellationToken = default)
     {
         if (System.IO.File.Exists(audioFile)) return;
         if (!IsAvailable()) return;
@@ -62,11 +63,20 @@ public class FFmpegService
         try
         {
             using var process = System.Diagnostics.Process.Start(CreateStartInfo($"-i \"{inputPath}\" -vn -c:a aac -y \"{audioFile}\""));
-            process?.WaitForExit(60000);
+            if (process != null)
+            {
+                await WaitForProcessOrCancellation(process, 60000, cancellationToken);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    if (!process.HasExited) process.Kill();
+                }
+            }
         }
+        catch (OperationCanceledException) { throw; }
         catch { }
 
-        progress?.Report((1, 1, "音频提取完成"));
+        if (!cancellationToken.IsCancellationRequested)
+            progress?.Report((1, 1, "音频提取完成"));
     }
 
     /// <summary>
@@ -77,7 +87,7 @@ public class FFmpegService
     /// <param name="outputPath">输出文件路径</param>
     /// <param name="originalCodec">原始视频编码</param>
     /// <param name="progress">进度报告回调</param>
-    public static async Task MergeVideoWithAudioAsync(string videoFile, string audioFile, string outputPath, string originalCodec, IProgress<(int current, int total, string status)>? progress = null)
+    public static async Task MergeVideoWithAudioAsync(string videoFile, string audioFile, string outputPath, string originalCodec, IProgress<(int current, int total, string status)>? progress = null, CancellationToken cancellationToken = default)
     {
         if (!IsAvailable())
         {
@@ -113,8 +123,16 @@ public class FFmpegService
             }
 
             using var process = System.Diagnostics.Process.Start(CreateStartInfo(args));
-            process?.WaitForExit(60000);
+            if (process != null)
+            {
+                await WaitForProcessOrCancellation(process, 60000, cancellationToken);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    if (!process.HasExited) process.Kill();
+                }
+            }
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"MergeVideoWithAudio error: {ex.Message}");
@@ -122,7 +140,8 @@ public class FFmpegService
                 System.IO.File.Move(videoFile, outputPath);
         }
 
-        progress?.Report((1, 1, "音视频合并完成"));
+        if (!cancellationToken.IsCancellationRequested)
+            progress?.Report((1, 1, "音视频合并完成"));
     }
 
     /// <summary>
@@ -134,7 +153,7 @@ public class FFmpegService
     /// <param name="fps">输出帧率</param>
     /// <param name="codec">视频编码</param>
     /// <param name="progress">进度报告回调</param>
-    public static async Task CombineImagesWithAudioAsync(string imageFolder, string audioFile, string outputPath, double fps, string codec, IProgress<(int current, int total, string status)>? progress = null)
+    public static async Task CombineImagesWithAudioAsync(string imageFolder, string audioFile, string outputPath, double fps, string codec, IProgress<(int current, int total, string status)>? progress = null, CancellationToken cancellationToken = default)
     {
         var imageFiles = System.IO.Directory.GetFiles(imageFolder, "*.jpg").OrderBy(f => f).ToArray();
         if (imageFiles.Length == 0) return;
@@ -155,7 +174,12 @@ public class FFmpegService
         int timeoutSeconds = 120;
         while (!process.HasExited && elapsedSeconds < timeoutSeconds)
         {
-            await Task.Delay(500);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                process.Kill();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            await Task.Delay(500, cancellationToken);
             elapsedSeconds += 1;
             progress?.Report((0, imageFiles.Length, $"正在合成视频... ({elapsedSeconds}/{timeoutSeconds}秒)"));
         }
@@ -170,7 +194,7 @@ public class FFmpegService
 
         if (System.IO.File.Exists(videoFile))
         {
-            await MergeVideoWithAudioAsync(videoFile, audioFile, outputPath, codec, progress);
+            await MergeVideoWithAudioAsync(videoFile, audioFile, outputPath, codec, progress, cancellationToken);
         }
 
         try
@@ -182,6 +206,19 @@ public class FFmpegService
         }
         catch { }
 
-        progress?.Report((imageFiles.Length, imageFiles.Length, "视频合成完成"));
+        if (!cancellationToken.IsCancellationRequested)
+            progress?.Report((imageFiles.Length, imageFiles.Length, "视频合成完成"));
+    }
+
+    private static async Task WaitForProcessOrCancellation(System.Diagnostics.Process process, int timeoutMs, CancellationToken cancellationToken)
+    {
+        var tcs = new TaskCompletionSource<bool>();
+        cancellationToken.Register(() => tcs.TrySetCanceled());
+        _ = Task.Run(() =>
+        {
+            process.WaitForExit(timeoutMs);
+            tcs.TrySetResult(true);
+        });
+        await tcs.Task;
     }
 }
