@@ -22,17 +22,28 @@ jobs:
       - name: Restore
         run: dotnet restore src/FaceMosaicSharp.csproj
 
-      - name: Publish
-        run: dotnet publish src/FaceMosaicSharp.csproj -c Release -o publish --self-contained false
+      - name: Publish (runtime-dependent)
+        run: dotnet publish src/FaceMosaicSharp.csproj -c Release -o publish/runtime-dependent --self-contained false
+
+      - name: Publish (self-contained)
+        run: dotnet publish src/FaceMosaicSharp.csproj -c Release -o publish/self-contained -runtime win-x64 --self-contained true
 
       - name: Package
-        run: Compress-Archive -Path publish/* -DestinationPath FaceMosaicSharp-${{ github.ref_name }}.zip
+        run: |
+          Compress-Archive -Path publish/runtime-dependent/* -DestinationPath FaceMosaicSharp-${{ github.ref_name }}.zip
+          Compress-Archive -Path publish/self-contained/* -DestinationPath FaceMosaicSharp-${{ github.ref_name }}-self-contained.zip
 
-      - name: Upload artifact
+      - name: Upload artifact (runtime-dependent)
         uses: actions/upload-artifact@v4
         with:
-          name: FaceMosaicSharp
-          path: publish/
+          name: FaceMosaicSharp-runtime-dependent
+          path: publish/runtime-dependent/
+
+      - name: Upload artifact (self-contained)
+        uses: actions/upload-artifact@v4
+        with:
+          name: FaceMosaicSharp-self-contained
+          path: publish/self-contained/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -40,5 +51,6 @@ jobs:
           files: FaceMosaicSharp-*.zip
           name: FaceMosaicSharp ${{ github.ref_name }}
           body: |
-            ## 更新内容
-            - 请在此填写发布说明
+            ## 下载说明
+            - `FaceMosaicSharp-版本.zip`：需要 .NET 10 运行时（体积小）
+            - `FaceMosaicSharp-版本-self-contained.zip`：独立包，无需安装运行时（即开即用）
