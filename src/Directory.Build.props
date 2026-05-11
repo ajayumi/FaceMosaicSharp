@@ -5,8 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>App.ico</ApplicationIcon>
-    <Version>1.0.2025.0510</Version>
-    <AssemblyVersion>1.0.2025.0510</AssemblyVersion>
-    <FileVersion>1.0.2025.0510</FileVersion>
+    <Version>1.0.2025.0511</Version>
+    <AssemblyVersion>1.0.2025.0511</AssemblyVersion>
+    <FileVersion>1.0.2025.0511</FileVersion>
   </PropertyGroup>
 </Project>
