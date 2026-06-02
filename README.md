@@ -134,6 +134,25 @@ brew install ffmpeg
 
 完成上述步骤后，UI 自动识别并展示新算法，无需修改 ViewModel 或其他服务代码。
 
+## 常见问题
+
+### 处理后的音视频不同步
+
+可能的原因及已实施的修复：
+
+- **帧提取不准确**：Emgu.CV `VideoCapture` 对部分编码（特别是 VFR 可变帧率视频）提取帧时可能出现帧数不准或丢帧。  
+  ✅ 已改用 **FFmpeg** 直接提取帧（`-qscale:v 2 -vsync 0`），精确解析容器，正确处理 B 帧重排序和 edit list。
+- **帧数截断**：`CapProp.FrameCount` 可能返回少于实际的帧数（如 3000 而非 3463），旧版本用此值限制提取帧数，导致尾部帧丢失。  
+  ✅ 全帧处理时**不再传递 `-frames:v` 限制**，FFmpeg 提取到视频末尾；同时通过 `ffprobe` 读取容器元数据中的 `nb_frames` 获取真实帧数。
+- **视频合成帧率异常**：`-f concat` 分离器处理图片序列时帧率行为不稳定，导致渐进式漂移。  
+  ✅ 改用 **image2 demuxer**（`-framerate`），帧率行为一致可靠。
+- **帧率计算偏差**：用错误帧数计算 FPS 导致视频播放速度偏移。  
+  ✅ 使用 `FPS = 实际帧数 / 源视频时长`（源时长通过 ffprobe 获取），确保视频总时长与音频精确匹配。
+- **AAC 二次编码偏移**：提取为 AAC 后合并时又重新编码为 AAC，AAC 编码器的 priming samples（约 23ms）叠加导致恒定偏移。  
+  ✅ 合并音视频时使用 `-c:a copy` 直接复制已提取的 AAC 流，避免重复编码。
+
+上述修复已在 `FFmpegService.cs` 和 `VideoProcessingService.cs` 中实现，重新编译即可生效。
+
 ## 许可证
 
 MIT License

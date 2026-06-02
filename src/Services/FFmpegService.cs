@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using System.Globalization;
+using System.IO;
 using System.Threading;
 
 namespace FaceMosaicSharp.Services;
@@ -45,6 +46,64 @@ public class FFmpegService
         }
 
         return _isAvailable.Value;
+    }
+
+    /// <summary>
+    /// 通过 ffprobe 获取视频时长（秒），失败时返回 0
+    /// </summary>
+    public static async Task<double> GetVideoDurationAsync(string inputPath, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "ffprobe",
+                Arguments = $"-v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"{inputPath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true
+            };
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process != null)
+            {
+                var output = await process.StandardOutput.ReadToEndAsync();
+                process.WaitForExit(3000);
+                var trimmed = output.Trim();
+                if (double.TryParse(trimmed, NumberStyles.Any, CultureInfo.InvariantCulture, out var duration))
+                    return duration;
+            }
+        }
+        catch { }
+        return 0;
+    }
+
+    /// <summary>
+    /// 通过 ffprobe 获取视频帧数（来自容器元数据），失败时返回 0
+    /// </summary>
+    public static async Task<int> GetVideoFrameCountAsync(string inputPath)
+    {
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "ffprobe",
+                Arguments = $"-v error -select_streams v:0 -show_entries stream=nb_frames -of default=noprint_wrappers=1:nokey=1 \"{inputPath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true
+            };
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process != null)
+            {
+                var output = await process.StandardOutput.ReadToEndAsync();
+                process.WaitForExit(3000);
+                var trimmed = output.Trim();
+                if (int.TryParse(trimmed, NumberStyles.Any, CultureInfo.InvariantCulture, out var count))
+                    return count;
+            }
+        }
+        catch { }
+        return 0;
     }
 
     /// <summary>
@@ -110,14 +169,14 @@ public class FFmpegService
             if (!string.IsNullOrEmpty(audioFile) && System.IO.File.Exists(audioFile))
             {
                 if (convertToH264)
-                    args = $"-i \"{videoFile}\" -i \"{audioFile}\" -c:v libx264 -preset fast -c:a aac -shortest -y \"{outputPath}\"";
+                    args = $"-i \"{videoFile}\" -i \"{audioFile}\" -c:v libx264 -preset fast -c:a copy -shortest -y \"{outputPath}\"";
                 else
-                    args = $"-i \"{videoFile}\" -i \"{audioFile}\" -c:v copy -c:a aac -shortest -y \"{outputPath}\"";
+                    args = $"-i \"{videoFile}\" -i \"{audioFile}\" -c:v copy -c:a copy -shortest -y \"{outputPath}\"";
             }
             else
             {
                 if (convertToH264)
-                    args = $"-i \"{videoFile}\" -c:v libx264 -preset fast -c:a aac -y \"{outputPath}\"";
+                    args = $"-i \"{videoFile}\" -c:v libx264 -preset fast -y \"{outputPath}\"";
                 else
                     args = $"-i \"{videoFile}\" -c copy -y \"{outputPath}\"";
             }
@@ -160,16 +219,10 @@ public class FFmpegService
 
         progress?.Report((0, imageFiles.Length, $"正在合成视频 ({imageFiles.Length} 帧)..."));
 
-        string listFile = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(imageFolder)!, "images.txt");
-        using (var writer = new System.IO.StreamWriter(listFile))
-        {
-            foreach (var file in imageFiles)
-                writer.WriteLine($"file '{file}'");
-        }
-
         string videoFile = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(imageFolder)!, "output_video.mp4");
 
-        var process = System.Diagnostics.Process.Start(CreateStartInfo($"-f concat -safe 0 -i \"{listFile}\" -r {fps} -c:v libx264 -preset ultrafast -pix_fmt yuv420p -y \"{videoFile}\""));
+        // 使用 image2 demuxer（比 concat 更可靠，帧率行为一致）
+        var process = System.Diagnostics.Process.Start(CreateStartInfo($"-framerate {fps} -i \"{imageFolder}\\frame_%06d.jpg\" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -y \"{videoFile}\""));
         int elapsedSeconds = 0;
         int timeoutSeconds = 120;
         while (!process.HasExited && elapsedSeconds < timeoutSeconds)
@@ -201,8 +254,6 @@ public class FFmpegService
         {
             if (System.IO.File.Exists(videoFile))
                 System.IO.File.Delete(videoFile);
-            if (System.IO.File.Exists(listFile))
-                System.IO.File.Delete(listFile);
         }
         catch { }
 

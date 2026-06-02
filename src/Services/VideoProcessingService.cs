@@ -198,14 +198,18 @@ public class VideoProcessingService : IVideoProcessingService
         var capture = new VideoCapture(inputPath);
         if (!capture.IsOpened) return new ProcessingResult { Success = false };
 
-        int totalFrames = (int)capture.Get(CapProp.FrameCount);
+        // 优先使用 ffprobe 获取准确帧数（CapProp.FrameCount 对某些编码不可靠）
+        int totalFrames = await FFmpegService.GetVideoFrameCountAsync(inputPath);
+        if (totalFrames <= 0)
+            totalFrames = (int)capture.Get(CapProp.FrameCount);
+
         int start = Math.Clamp(options.StartFrame, 0, totalFrames - 1);
         int end = options.EndFrame <= 0 ? totalFrames : Math.Clamp(options.EndFrame + 1, start, totalFrames);
         int framesToProcess = options.ProcessAllFrames ? totalFrames : end - start;
 
         await FFmpegService.ExtractAudioAsync(inputPath, audioFile, progress, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        await Task.Run(() => ExtractFramesToStepFolder(capture, stepFolder1, framesToProcess, start, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
+        await Task.Run(() => ExtractFramesToStepFolder(inputPath, stepFolder1, framesToProcess, start, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         await Task.Run(() => DetectFacesToStepFolder(stepFolder1, stepFolder2, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
 
@@ -214,78 +218,62 @@ public class VideoProcessingService : IVideoProcessingService
         return new ProcessingResult { Success = true, NeedsManualReview = needsManualReview, HistoryDir = historyDir, WasInterrupted = false };
     }
 
-    /// <summary>Step 1: 从视频中提取帧序列保存为 JPG（生产者-消费者并行写盘）</summary>
-    private void ExtractFramesToStepFolder(VideoCapture capture, string outputFolder, int frameCount, int startFrame, ProcessingOptions options, IProgress<(int current, int total, string status)>? progress, CancellationToken cancellationToken, Action<Mat>? onFrameProcessed = null)
+    /// <summary>Step 1: 使用 FFmpeg 从视频中提取帧序列保存为 JPG（比 Emgu.CV VideoCapture 更准确，支持 VFR）</summary>
+    private void ExtractFramesToStepFolder(string inputPath, string outputFolder, int frameCount, int startFrame, ProcessingOptions options, IProgress<(int current, int total, string status)>? progress, CancellationToken cancellationToken, Action<Mat>? onFrameProcessed = null)
     {
         var existingFiles = _historyService.CountFrameFiles(outputFolder, "frame_*.jpg");
         if (existingFiles >= frameCount) return;
 
-        capture.Set(CapProp.PosFrames, startFrame + existingFiles);
-
-        int consumerCount = Math.Max(1, Environment.ProcessorCount / 2);
-        var channel = Channel.CreateBounded<(Mat frame, int absIdx)>(
-            new BoundedChannelOptions(consumerCount * 4)
-            {
-                FullMode = BoundedChannelFullMode.Wait,
-                SingleWriter = true
-            });
-
-        int completedCount = existingFiles;
-        var consumers = new Task[consumerCount];
-
-        for (int ci = 0; ci < consumerCount; ci++)
+        // 清除不完整的残留文件，确保从头提取
+        if (existingFiles > 0)
         {
-            consumers[ci] = Task.Run(async () =>
-            {
-                var reader = channel.Reader;
-                try
-                {
-                    await foreach (var (frame, absIdx) in reader.ReadAllAsync(cancellationToken))
-                    {
-                        var fileName = System.IO.Path.Combine(outputFolder, $"frame_{absIdx:D6}.jpg");
-                        CvInvoke.Imwrite(fileName, frame);
-                        frame.Dispose();
-                        var done = Interlocked.Increment(ref completedCount);
-                        progress?.Report((done, frameCount, $"正在提取第 {absIdx + 1}/{startFrame + frameCount} 帧..."));
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    while (reader.TryRead(out var item))
-                        item.frame.Dispose();
-                }
-            }, cancellationToken);
+            foreach (var f in Directory.GetFiles(outputFolder, "frame_*.jpg"))
+                File.Delete(f);
         }
 
-        try
+        var args = $"-i \"{inputPath}\" -qscale:v 2 -vsync 0 -start_number {startFrame} ";
+
+        if (startFrame > 0)
+            args += $"-vf \"select='gte(n,{startFrame})'\" ";
+
+        // 仅对范围处理（非全帧）限制提取帧数，全帧处理时让 FFmpeg 提取到结尾
+        // （CapProp.FrameCount 可能少于实际帧数，用 -frames:v 会丢失尾部帧导致不同步）
+        if (!options.ProcessAllFrames && frameCount > 0)
+            args += $"-frames:v {frameCount} ";
+
+        args += $"\"{outputFolder}\\frame_%06d.jpg\"";
+
+        var psi = new System.Diagnostics.ProcessStartInfo
         {
-            for (int i = existingFiles; i < frameCount; i++)
+            FileName = "ffmpeg",
+            Arguments = args,
+            UseShellExecute = true,
+            CreateNoWindow = true,
+            WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+        };
+
+        using var process = System.Diagnostics.Process.Start(psi);
+        if (process == null) return;
+
+        int timeout = 300;
+        while (!process.HasExited && timeout > 0)
+        {
+            if (cancellationToken.IsCancellationRequested)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var frame = new Mat();
-                capture.Read(frame);
-                if (frame.IsEmpty) { frame.Dispose(); break; }
-
-                int absIdx = startFrame + i;
-                channel.Writer.WriteAsync((frame, absIdx), cancellationToken)
-                    .AsTask().GetAwaiter().GetResult();
-
-                if (onFrameProcessed != null && i % options.FrameInterval == 0)
-                {
-                    using var previewClone = frame.Clone();
-                    onFrameProcessed(previewClone);
-                }
+                if (!process.HasExited) process.Kill();
+                return;
             }
-        }
-        finally
-        {
-            channel.Writer.Complete();
+            var currentFiles = Directory.GetFiles(outputFolder, "frame_*.jpg").Length;
+            progress?.Report((currentFiles, frameCount, $"正在提取帧 {currentFiles}/{frameCount}..."));
+            Thread.Sleep(1000);
+            timeout--;
         }
 
-        try { Task.WaitAll(consumers); }
-        catch (AggregateException ae) when (ae.InnerExceptions.All(e => e is OperationCanceledException)) { }
-        catch (OperationCanceledException) { }
+        if (!process.HasExited)
+        {
+            process.Kill();
+            throw new TimeoutException("FFmpeg 帧提取超时");
+        }
     }
 
     /// <summary>Step 2: 检测每帧的人脸，保存人脸矩形、关键点凸包、面部解析掩码</summary>
@@ -1052,7 +1040,31 @@ public class VideoProcessingService : IVideoProcessingService
         cancellationToken.ThrowIfCancellationRequested();
         await Task.Run(() => ApplyMosaicToStepFolder(stepFolder1, stepFolder2, stepFolder3, options, progress, cancellationToken, onFrameProcessed), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        await FFmpegService.CombineImagesWithAudioAsync(stepFolder3, audioFile, options.OutputPath, capture.Get(CapProp.Fps), options.VideoCodec, progress, cancellationToken);
+
+        // 统计实际帧数并计算正确的输出帧率，确保视频时长与音频匹配
+        var actualFrameFiles = Directory.GetFiles(stepFolder3, "*.jpg");
+        int actualFrameCount = actualFrameFiles.Length;
+
+        double fps;
+        if (options.OutputFps > 0)
+        {
+            fps = options.OutputFps;
+        }
+        else
+        {
+            fps = capture.Get(CapProp.Fps);
+            if (options.ProcessAllFrames && actualFrameCount > 0)
+            {
+                double duration = await FFmpegService.GetVideoDurationAsync(inputPath, cancellationToken);
+                if (duration > 0)
+                {
+                    fps = actualFrameCount / duration;
+                    fps = Math.Clamp(fps, 1, 120);
+                }
+            }
+        }
+
+        await FFmpegService.CombineImagesWithAudioAsync(stepFolder3, audioFile, options.OutputPath, fps, options.VideoCodec, progress, cancellationToken);
 
         _historyService.CleanupProcessingFolders(stepFolder2, stepFolder3);
         capture.Dispose();
